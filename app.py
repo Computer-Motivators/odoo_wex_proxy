@@ -19,6 +19,8 @@ WEX_PASSWORD = os.getenv('WEX_PASSWORD')
 MERCHANT_CODE = os.getenv('MERCHANT_CODE', '*')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
+logging.debug(f'Loaded environment variables: AUTH_TOKEN={AUTH_TOKEN}, TEST_MODE={TEST_MODE}, WEX_API_URL={WEX_API_URL}, WEX_USERNAME={WEX_USERNAME}, MERCHANT_CODE={MERCHANT_CODE}, WEBHOOK_URL={WEBHOOK_URL}')
+
 app = Flask(__name__)
 
 @app.route('/proxy', methods=['POST'])
@@ -34,6 +36,7 @@ def proxy():
         return jsonify({'error': 'Invalid JSON', 'message': str(e)}), 400
 
     # Verify authorization token in body
+    logging.debug(f'Verifying that AUTH_TOKEN=\'{AUTH_TOKEN}\' matches x_studio_proxy_auth_token=\'{data.get("x_studio_proxy_auth_token")}\'')
     if AUTH_TOKEN and data.get('x_studio_proxy_auth_token') != AUTH_TOKEN:
         logging.warning('Unauthorized access attempt')
         return jsonify({'error': 'Unauthorized'}), 401
