@@ -1,0 +1,8 @@
+version: '3.8'
+
+services:
+  odoo_wex_proxy:
+    build: .
+    ports:
+      - "8844:5000"
+    restart: unless-stopped
