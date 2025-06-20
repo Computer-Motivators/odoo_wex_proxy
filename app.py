@@ -34,7 +34,7 @@ def proxy():
         return jsonify({'error': 'Invalid JSON', 'message': str(e)}), 400
 
     # Verify authorization token in body
-    if AUTH_TOKEN and data.get('auth_token') != AUTH_TOKEN:
+    if AUTH_TOKEN and data.get('x_studio_proxy_auth_token') != AUTH_TOKEN:
         logging.warning('Unauthorized access attempt')
         return jsonify({'error': 'Unauthorized'}), 401
 
