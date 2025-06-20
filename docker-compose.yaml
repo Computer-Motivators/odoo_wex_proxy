@@ -4,7 +4,7 @@ services:
   odoo_wex_proxy:
     build: .
     container_name: odoo_wex_proxy
-    image: odoo_wex_proxy:latest
+    # image: odoo_wex_proxy:latest
     environment:
       - AUTH_TOKEN=${AUTH_TOKEN}
       - WEX_API_URL=${WEX_API_URL:-https://demoservices.wrightexpresscorpcard.com/api/merchant-logs/v1}
