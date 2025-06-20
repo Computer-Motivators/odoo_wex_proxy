@@ -1,8 +1,18 @@
-version: '3.8'
+version: "3.8"
 
 services:
   odoo_wex_proxy:
     build: .
+    container_name: odoo_wex_proxy
+    image: odoo_wex_proxy:latest
+    environment:
+      - AUTH_TOKEN=${AUTH_TOKEN}
+      - WEX_API_URL=${WEX_API_URL:-https://demoservices.wrightexpresscorpcard.com/api/merchant-logs/v1}
+      - WEX_USERNAME=${WEX_USERNAME:-your_username}
+      - WEX_PASSWORD=${WEX_PASSWORD:-your_password}
+      - MERCHANT_CODE=${MERCHANT_CODE:-*}
+      - TEST_MODE=${TEST_MODE:-true}
+      - WEBHOOK_URL=${WEBHOOK_URL}
     ports:
       - "8844:5000"
     restart: unless-stopped
