@@ -5,31 +5,31 @@
 ![Docker](https://img.shields.io/badge/docker-ready-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-A Flask-based API proxy service that interfaces between Odoo and the WEX API for payment processing. This service handles virtual card generation for vendor payments with comprehensive logging and error handling.
+A Flask-based API proxy that bridges Odoo and the WEX API for payment processing. It generates virtual cards for vendor payments, **reliably forwards results to Odoo with TCP-like retries + ACKs**, and includes comprehensive logging and error handling.
 
 ## 📋 Table of Contents
 
-- [Features](#-features)
-- [Project Structure](#-project-structure)
-- [Prerequisites](#-prerequisites)
-- [Installation](#-installation)
-- [Configuration](#-configuration)
-- [Development](#-development)
-- [Deployment](#-deployment)
-- [API Documentation](#-api-documentation)
-- [Testing](#-testing)
-- [Troubleshooting](#-troubleshooting)
+* [Features](#-features)
+* [Project Structure](#-project-structure)
+* [Prerequisites](#-prerequisites)
+* [Configuration](#-configuration)
+* [Development](#-development)
+* [Deployment](#-deployment)
+* [API Documentation](#-api-documentation)
+* [Testing](#-testing)
+* [Troubleshooting](#-troubleshooting)
 
 ## ✨ Features
 
-- 🔄 **API Proxy**: Seamless integration between Odoo and WEX API
-- 💳 **Virtual Card Generation**: Automated virtual card creation for payments
-- 🔐 **Authentication**: Token-based security for API endpoints
-- 📊 **Comprehensive Logging**: Detailed logging for debugging and monitoring
-- 🧪 **Test Mode**: Built-in test mode for development and testing
-- 🐳 **Docker Support**: Containerized deployment with Docker Compose
-- 🔄 **Webhook Integration**: Automatic forwarding of responses to downstream systems
-- ⚡ **Production Ready**: Uses Waitress WSGI server for production deployment
+* 🔄 **API Proxy**: Seamless integration between Odoo and the WEX API
+* 💳 **Virtual Card Generation**: Automated virtual card creation for payments
+* 🔐 **Authentication**: Token in **body** (`x_studio_proxy_auth_token`) **or** header (`X-Proxy-Auth-Token`)
+* 📊 **Comprehensive Logging**: Structured logs for debugging and monitoring
+* 🧪 **Test Mode**: Built-in simulator; no external WEX calls
+* 🐳 **Docker Support**: Containerized deployment with Compose
+* 📣 **Webhook Integration**: Automatic forwarding of success/error to your downstream Odoo webhook
+* 🛰️ **Reliable Delivery (New)**: TCP-like retries with **ACK** from Odoo, **exponential backoff**, and **idempotency** fields (`_delivery_id`, `_delivery_attempt`)
+* ⚡ **Production Ready**: Waitress WSGI server
 
 ## 📁 Project Structure
 
@@ -45,63 +45,71 @@ odoo_wex_proxy/
 
 ## 🔧 Prerequisites
 
-- Python 3.11+
-- Docker and Docker Compose (for containerized deployment)
-- WEX API credentials
-- Access to target webhook endpoint
+* Python 3.11+
+* Docker and Docker Compose (optional but recommended)
+* WEX API credentials
+* Access to the downstream Odoo webhook endpoint
 
 ## ⚙️ Configuration
 
-Create a `.env` file in the project root with the following variables:
+Create a `.env` file in the project root:
 
 ```env
 # Authentication
 AUTH_TOKEN=your_secure_auth_token
 
 # WEX API Configuration
-WEX_API_URL=https://api.wex.com/endpoint
+WEX_API_URL=https://api.wex.com/merchant/log
 WEX_USERNAME=your_wex_username
 WEX_PASSWORD=your_wex_password
 MERCHANT_CODE=*
 
-# Application Settings
+# App Settings
 TEST_MODE=false
 WEBHOOK_URL=https://your-webhook-endpoint.com
+
+# Reliable Delivery Controls (TCP-like)
+MAX_DOWNSTREAM=5                       # Max delivery attempts
+ACK_TIMEOUT_SECONDS=10                 # Wait for ACK after each attempt
+DOWNSTREAM_RETRY_BASE_SECONDS=2        # Backoff base: 2,4,8,...
+DOWNSTREAM_POST_TIMEOUT_SECONDS=10     # HTTP timeout per attempt
 ```
 
 ### Environment Variables
 
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `AUTH_TOKEN` | Authentication token for API security | No | None |
-| `WEX_API_URL` | WEX API endpoint URL | Yes | None |
-| `WEX_USERNAME` | WEX API username | Yes | None |
-| `WEX_PASSWORD` | WEX API password | Yes | None |
-| `MERCHANT_CODE` | Merchant identifier for WEX | No | `*` |
-| `TEST_MODE` | Enable test mode (true/false) | No | `false` |
-| `WEBHOOK_URL` | Downstream webhook URL | Yes | None |
+| Variable                          | Description                                                                                            | Required | Default |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------ | -------- | ------- |
+| `AUTH_TOKEN`                      | Token for securing `/proxy` & `/ack` (body `x_studio_proxy_auth_token` or header `X-Proxy-Auth-Token`) | No       | None    |
+| `WEX_API_URL`                     | WEX API endpoint URL                                                                                   | Yes      | —       |
+| `WEX_USERNAME`                    | WEX API username                                                                                       | Yes      | —       |
+| `WEX_PASSWORD`                    | WEX API password                                                                                       | Yes      | —       |
+| `MERCHANT_CODE`                   | Merchant identifier for WEX                                                                            | No       | `*`     |
+| `TEST_MODE`                       | Simulate WEX responses                                                                                 | No       | `false` |
+| `WEBHOOK_URL`                     | Downstream Odoo webhook URL                                                                            | Yes      | —       |
+| `MAX_DOWNSTREAM`                  | Max downstream attempts (success only)                                                                 | No       | `5`     |
+| `ACK_TIMEOUT_SECONDS`             | Seconds to wait for ACK per attempt                                                                    | No       | `10`    |
+| `DOWNSTREAM_RETRY_BASE_SECONDS`   | Exponential backoff base seconds                                                                       | No       | `2`     |
+| `DOWNSTREAM_POST_TIMEOUT_SECONDS` | Timeout for each POST to webhook                                                                       | No       | `10`    |
+
+**Idempotency:** Each downstream delivery includes `_delivery_id` (stable UUID for the success) and `_delivery_attempt` (1..N). Your Odoo intake should de-duplicate by `_delivery_id` (or by `payment_id` if you prefer).
 
 ## 💻 Development
 
 ### Running Locally
 
 ```bash
-# Activate virtual environment
+python -m venv venv
 source venv/bin/activate
+pip install -r requirements.txt
 
-# Set environment variables
 export FLASK_ENV=development
 export FLASK_DEBUG=1
-
-# Run the application
 python app.py
 ```
 
-The application will be available at `http://localhost:5000`
+App listens on `http://localhost:5000`.
 
 ### Development with Test Mode
-
-Enable test mode to simulate WEX API responses:
 
 ```bash
 export TEST_MODE=true
@@ -113,31 +121,30 @@ python app.py
 ### Docker Compose (Recommended)
 
 1. **Configure environment variables**
+
    ```bash
-   cp .env.example .env
-   # Edit .env with your actual values
+   cp .env.example .env  # or create .env from the snippet above
    ```
 
-2. **Deploy the service**
+2. **Deploy**
+
    ```bash
    docker-compose up -d
    ```
 
-3. **Check service status**
+3. **Check status & logs**
+
    ```bash
    docker-compose ps
-   docker-compose logs odoo_wex_proxy
+   docker-compose logs -f odoo_wex_proxy
    ```
 
-The service will be available at `http://localhost:8844`
+Service is available at `http://localhost:8844`.
 
-### Manual Docker Deployment
+### Manual Docker
 
 ```bash
-# Build the image
 docker build -t odoo_wex_proxy .
-
-# Run the container
 docker run -d \
   --name wex_docker \
   -p 8844:5000 \
@@ -147,15 +154,19 @@ docker run -d \
 
 ## 📚 API Documentation
 
-### POST /proxy
+### POST `/proxy`
 
-Processes payment requests and generates virtual cards through the WEX API.
+Processes a payment request from Odoo, calls WEX (or simulates), and **starts reliable downstream delivery** to `WEBHOOK_URL`. The HTTP response to the caller is immediate; retries happen in the background until an **ACK** is received.
 
 #### Request Body
 
+Either send the token in the body **or** the header.
+
+**Body fields:**
+
 ```json
 {
-  "auth_token": "your_auth_token",
+  "x_studio_proxy_auth_token": "your_auth_token",
   "_id": "unique_request_id",
   "x_name": "payment_id",
   "x_studio_vendor_name": "Vendor Company Name",
@@ -165,7 +176,16 @@ Processes payment requests and generates virtual cards through the WEX API.
 }
 ```
 
+**Header alternative:**
+
+```
+X-Proxy-Auth-Token: your_auth_token
+```
+
 #### Success Response (200)
+
+> This is the synchronous response to the caller.
+> The **downstream webhook** will receive the same object **plus** `_delivery_id` and `_delivery_attempt`.
 
 ```json
 {
@@ -184,7 +204,19 @@ Processes payment requests and generates virtual cards through the WEX API.
 }
 ```
 
+**Downstream delivery (example extra fields):**
+
+```json
+{
+  "...": "...",
+  "_delivery_id": "e8f0e6e8-1a9b-4d2f-8f7f-2a3b4c5d6e7f",
+  "_delivery_attempt": 2
+}
+```
+
 #### Error Response (4xx/5xx)
+
+(Forwarded **once** to the downstream webhook; no retries.)
 
 ```json
 {
@@ -195,63 +227,97 @@ Processes payment requests and generates virtual cards through the WEX API.
 }
 ```
 
+---
+
+### POST `/ack`  **(New)**
+
+Odoo must call this to acknowledge successful processing of a **success** delivery. The proxy stops retrying once it receives the ACK.
+
+#### Request Body
+
+```json
+{
+  "payment_id": "payment_id",               // or "x_name"
+  "x_studio_proxy_auth_token": "your_auth_token"
+}
+```
+
+**Header alternative:**
+
+```
+X-Proxy-Auth-Token: your_auth_token
+```
+
+#### Response (200)
+
+```json
+{
+  "status": "acknowledged",
+  "payment_id": "payment_id"
+}
+```
+
+> Tip: If your Odoo intake is idempotent, you can safely ACK the first time you see a `_delivery_id` you haven’t processed yet.
+
 ## 🧪 Testing
 
-### Manual Testing
+### Manual Testing (success path)
 
-Use curl or any HTTP client to test the endpoint:
+1. **Kick off a payment (test mode shown here):**
 
-```bash
-curl -X POST http://localhost:8844/proxy \
-  -H "Content-Type: application/json" \
-  -d '{
-    "auth_token": "your_token",
-    "_id": "test-123",
-    "x_name": "PAY-001",
-    "x_studio_vendor_name": "Test Vendor",
-    "x_studio_vendor_payment_amount_requested": 100.50,
-    "x_studio_hauler_invoice_or_remittance_advice_memo": "TEST-INV-001",
-    "x_studio_employee_name": "Test Employee"
-  }'
-```
+   ```bash
+   curl -X POST http://localhost:8844/proxy \
+     -H "Content-Type: application/json" \
+     -H "X-Proxy-Auth-Token: your_token" \
+     -d '{
+       "_id": "test-123",
+       "x_name": "PAY-001",
+       "x_studio_vendor_name": "Test Vendor",
+       "x_studio_vendor_payment_amount_requested": 100.50,
+       "x_studio_hauler_invoice_or_remittance_advice_memo": "TEST-INV-001",
+       "x_studio_employee_name": "Test Employee"
+     }'
+   ```
 
-### Test Mode
+2. **Simulate Odoo’s ACK once your webhook receives the success:**
 
-Enable test mode for development:
+   ```bash
+   curl -X POST http://localhost:8844/ack \
+     -H "Content-Type: application/json" \
+     -H "X-Proxy-Auth-Token: your_token" \
+     -d '{ "payment_id": "PAY-001" }'
+   ```
 
-```bash
-export TEST_MODE=true
-```
-
-In test mode, the application simulates WEX API responses without making actual API calls.
+Observe logs for retry attempts and the “ACK received” message.
 
 ## 🔍 Troubleshooting
 
-### Common Issues
+### Not receiving downstream deliveries
 
-1. **Port already in use**
-   ```bash
-   # Check what's using the port
-   lsof -i :8844
-   # Kill the process or change the port in docker-compose.yaml
-   ```
+* Confirm `WEBHOOK_URL` is reachable from the container (network/firewall).
+* Ensure your Odoo endpoint returns **200 OK** (failures still count as “no ACK”).
+* Watch logs for lines like: `No ACK yet ... sleeping ...` — tune:
 
-2. **Environment variables not loaded**
-   ```bash
-   # Verify .env file exists and has correct format
-   cat .env
-   # Restart the container
-   docker-compose restart
-   ```
+  * `ACK_TIMEOUT_SECONDS` (increase wait per attempt)
+  * `MAX_DOWNSTREAM` (more attempts)
+  * `DOWNSTREAM_RETRY_BASE_SECONDS` (slower/faster backoff)
 
-3. **WEX API authentication errors**
-   - Verify `WEX_USERNAME` and `WEX_PASSWORD` are correct
-   - Check `WEX_API_URL` is accessible
-   - Ensure credentials are properly base64 encoded
+### Duplicates at Odoo
+
+* Deduplicate on `_delivery_id` (recommended) or `payment_id`.
+* ACK promptly after persisting; retries stop immediately on ACK.
+
+### Auth errors
+
+* Use **either** body `x_studio_proxy_auth_token` **or** header `X-Proxy-Auth-Token`.
+* Verify `AUTH_TOKEN` in `.env`.
+
+### WEX API errors
+
+* Check credentials and `WEX_API_URL`.
+* Use `TEST_MODE=true` to isolate proxy logic from WEX.
 
 ### Logging
-
-The application provides comprehensive logging. Check logs with:
 
 ```bash
 # Docker Compose
@@ -260,30 +326,27 @@ docker-compose logs -f odoo_wex_proxy
 # Docker
 docker logs -f wex_docker
 
-# Local development
-# Logs are printed to console
+# Local
+# Logs print to console (DEBUG by default)
 ```
 
-### Health Check
+### Health
 
-Verify the service is running:
-
-```bash
-# Check if the service responds
-curl -X GET http://localhost:8844/
-```
+* Use container status + logs (`docker ps`, `docker logs`).
+* Optionally add your own healthcheck in Compose that curls `/proxy` with `-X OPTIONS` or hits your Odoo webhook from a separate monitor.
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).
 
 ## 📞 Support
 
 For support and questions:
-- Check the [Troubleshooting](#-troubleshooting) section
-- Review application logs
-- Contact us at [Computer Motivators](https://www.computermotivators.com)
+
+* Check [Troubleshooting](#-troubleshooting)
+* Review application logs
+* Contact **Computer Motivators**: [https://www.computermotivators.com](https://www.computermotivators.com)
 
 ---
 
-Built with ❤️ for our client in waste management
+Built with ❤️ for our client in waste management.

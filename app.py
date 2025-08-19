@@ -5,6 +5,10 @@ from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import base64
 import logging
+import time
+import uuid
+import random
+from threading import Event, Lock, Thread
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -19,9 +23,126 @@ WEX_PASSWORD = os.getenv('WEX_PASSWORD')
 MERCHANT_CODE = os.getenv('MERCHANT_CODE', '*')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
-logging.debug(f'Loaded environment variables: AUTH_TOKEN={AUTH_TOKEN}, TEST_MODE={TEST_MODE}, WEX_API_URL={WEX_API_URL}, WEX_USERNAME={WEX_USERNAME}, MERCHANT_CODE={MERCHANT_CODE}, WEBHOOK_URL={WEBHOOK_URL}')
+# New env-driven controls for TCP-like downstream delivery
+try:
+    MAX_DOWNSTREAM = int(os.getenv('MAX_DOWNSTREAM', '5') or '5')
+except ValueError:
+    MAX_DOWNSTREAM = 5
+try:
+    ACK_TIMEOUT_SECONDS = int(os.getenv('ACK_TIMEOUT_SECONDS', '10') or '10')
+except ValueError:
+    ACK_TIMEOUT_SECONDS = 10
+try:
+    DOWNSTREAM_RETRY_BASE_SECONDS = int(os.getenv('DOWNSTREAM_RETRY_BASE_SECONDS', '2') or '2')
+except ValueError:
+    DOWNSTREAM_RETRY_BASE_SECONDS = 2
+try:
+    DOWNSTREAM_POST_TIMEOUT_SECONDS = int(os.getenv('DOWNSTREAM_POST_TIMEOUT_SECONDS', '10') or '10')
+except ValueError:
+    DOWNSTREAM_POST_TIMEOUT_SECONDS = 10
+
+# Mask sensitive values in logs
+logging.debug(
+    f'Loaded env: TEST_MODE={TEST_MODE}, WEX_API_URL={WEX_API_URL}, '
+    f'MERCHANT_CODE={MERCHANT_CODE}, WEBHOOK_URL={WEBHOOK_URL}, '
+    f'MAX_DOWNSTREAM={MAX_DOWNSTREAM}, ACK_TIMEOUT_SECONDS={ACK_TIMEOUT_SECONDS}, '
+    f'DOWNSTREAM_RETRY_BASE_SECONDS={DOWNSTREAM_RETRY_BASE_SECONDS}, '
+    f'DOWNSTREAM_POST_TIMEOUT_SECONDS={DOWNSTREAM_POST_TIMEOUT_SECONDS}'
+)
 
 app = Flask(__name__)
+
+# ---- ACK tracking (payment_id -> Event) ----
+_ACK_EVENTS = {}
+_ACK_LOCK = Lock()
+
+def _get_or_create_ack_event(payment_id: str) -> Event:
+    with _ACK_LOCK:
+        ev = _ACK_EVENTS.get(payment_id)
+        if ev is None:
+            ev = Event()
+            _ACK_EVENTS[payment_id] = ev
+        return ev
+
+def _clear_ack_event(payment_id: str) -> None:
+    with _ACK_LOCK:
+        _ACK_EVENTS.pop(payment_id, None)
+
+def _verify_auth_from_body_or_header(req_json):
+    token = None
+    if isinstance(req_json, dict):
+        token = req_json.get('x_studio_proxy_auth_token')
+    if not token:
+        token = request.headers.get('X-Proxy-Auth-Token')
+    if AUTH_TOKEN and token != AUTH_TOKEN:
+        return False
+    return True
+
+def _forward_with_ack(payload: dict, payment_id: str):
+    """
+    Attempt to deliver payload to WEBHOOK_URL until we receive an ACK for payment_id
+    via POST /ack. Exponential backoff between attempts. Stops early upon ACK.
+    """
+    ev = _get_or_create_ack_event(payment_id)
+    delivery_id = payload.get('_delivery_id') or str(uuid.uuid4())
+    attempts = MAX_DOWNSTREAM
+
+    for attempt in range(1, attempts + 1):
+        try:
+            enriched = dict(payload)
+            enriched['_delivery_id'] = delivery_id
+            enriched['_delivery_attempt'] = attempt
+            logging.info(f'Forwarding to downstream (attempt {attempt}/{attempts}) for payment_id={payment_id}')
+            requests.post(
+                WEBHOOK_URL,
+                json=enriched,
+                timeout=DOWNSTREAM_POST_TIMEOUT_SECONDS
+            )
+        except Exception as e:
+            logging.error(f'POST to downstream failed on attempt {attempt}: {e}')
+
+        logging.debug(f'Waiting up to {ACK_TIMEOUT_SECONDS}s for ACK of payment_id={payment_id}')
+        if ev.wait(timeout=ACK_TIMEOUT_SECONDS):
+            logging.info(f'ACK received for payment_id={payment_id}. Stopping retries.')
+            _clear_ack_event(payment_id)
+            return
+
+        if attempt < attempts:
+            # Exponential backoff with light jitter (+/- 20%)
+            base = DOWNSTREAM_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+            jitter = base * (random.uniform(-0.2, 0.2))
+            sleep_s = max(1, int(base + jitter))
+            logging.warning(f'No ACK yet for payment_id={payment_id}; sleeping {sleep_s}s before retry.')
+            time.sleep(sleep_s)
+
+    logging.error(f'No ACK after {attempts} attempts for payment_id={payment_id}. Giving up.')
+    _clear_ack_event(payment_id)
+
+@app.route('/ack', methods=['POST'])
+def ack():
+    """
+    Odoo calls this to acknowledge receipt/processing of a previously delivered success payload.
+    Body must include: { "payment_id": "...", "x_studio_proxy_auth_token": "..." }
+    """
+    try:
+        data = request.get_json(force=True)
+    except Exception as e:
+        logging.error(f'ACK endpoint: invalid JSON: {e}')
+        return jsonify({'error': 'Invalid JSON', 'message': str(e)}), 400
+
+    if not _verify_auth_from_body_or_header(data):
+        logging.warning('ACK endpoint: unauthorized')
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    payment_id = data.get('payment_id') or data.get('x_name')
+    if not payment_id:
+        logging.warning('ACK endpoint: missing payment_id')
+        return jsonify({'error': 'Missing payment_id'}), 400
+
+    ev = _get_or_create_ack_event(payment_id)
+    ev.set()
+    logging.info(f'ACK set for payment_id={payment_id}')
+    return jsonify({'status': 'acknowledged', 'payment_id': payment_id}), 200
 
 @app.route('/proxy', methods=['POST'])
 def proxy():
@@ -35,9 +156,8 @@ def proxy():
         logging.error(f'Error parsing JSON: {e}')
         return jsonify({'error': 'Invalid JSON', 'message': str(e)}), 400
 
-    # Verify authorization token in body
-    logging.debug(f'Verifying that AUTH_TOKEN=\'{AUTH_TOKEN}\' matches x_studio_proxy_auth_token=\'{data.get("x_studio_proxy_auth_token")}\'')
-    if AUTH_TOKEN and data.get('x_studio_proxy_auth_token') != AUTH_TOKEN:
+    # Verify authorization token in body/header
+    if not _verify_auth_from_body_or_header(data):
         logging.warning('Unauthorized access attempt')
         return jsonify({'error': 'Unauthorized'}), 401
 
@@ -52,7 +172,10 @@ def proxy():
         # Ensure amount is float
         if not isinstance(amount, (int, float)):
             amount = float(amount)
-        logging.debug(f'Extracted fields: request_id={request_id}, payment_id={payment_id}, hauler_name={hauler_name}, amount={amount}, invoice_number={invoice_number}, employee={employee}')
+        logging.debug(
+            f'Extracted fields: request_id={request_id}, payment_id={payment_id}, '
+            f'hauler_name={hauler_name}, amount={amount}, invoice_number={invoice_number}, employee={employee}'
+        )
     except Exception as e:
         logging.error(f'Error extracting fields: {e}')
         return jsonify({'error': 'Invalid input', 'message': str(e)}), 400
@@ -115,10 +238,10 @@ def proxy():
             'status': wex_status,
             'error': msg or wex_json
         }
-        # Forward error to downstream webhook
+        # Forward error to downstream webhook (single shot)
         try:
-            logging.info('Forwarding error to downstream webhook')
-            requests.post(WEBHOOK_URL, json=error_payload)
+            logging.info('Forwarding error to downstream webhook (no retry)')
+            requests.post(WEBHOOK_URL, json=error_payload, timeout=DOWNSTREAM_POST_TIMEOUT_SECONDS)
         except Exception as e:
             logging.error(f'Failed to forward error to webhook: {e}')
         return jsonify(error_payload), wex_status
@@ -140,16 +263,19 @@ def proxy():
         'hauler_name': hauler_name,
         'employee': employee,
         'invoice_number': invoice_number
+        # Optionally include: 'ack_url': f"{request.url_root.rstrip('/')}/ack"
     }
     logging.debug(f'Constructed response: {result}')
 
-    # Forward success to downstream webhook
+    # Start TCP-like downstream delivery in background
     try:
-        logging.info('Forwarding success to downstream webhook')
-        requests.post(WEBHOOK_URL, json=result)
+        logging.info('Starting background delivery with ACK tracking')
+        t = Thread(target=_forward_with_ack, args=(result, payment_id), daemon=True)
+        t.start()
     except Exception as e:
-        logging.error(f'Failed to forward success to webhook: {e}')
+        logging.error(f'Failed to start delivery thread: {e}')
 
+    # Respond to caller immediately
     return jsonify(result), 200
 
 if __name__ == '__main__':
